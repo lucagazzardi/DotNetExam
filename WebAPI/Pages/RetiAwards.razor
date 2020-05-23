@@ -1,0 +1,206 @@
+﻿@page "/retiawards"
+@using Microsoft.AspNetCore.SignalR.Client;
+@using System.Net.Http
+@using WebAPI.Models
+@using WebAPI.DataBase
+@inject NavigationManager NavigationManager;
+@inject HttpClient Http;
+@inject IHttpClientFactory clientFactory;
+
+
+<h3>RetiAwards</h3>
+<br />
+<h4>Login</h4>
+<br />
+<input type="text" placeholder="Username" style="margin-bottom:10px" @bind="usernameInput" />
+<br />
+<input type="text" placeholder="Password" style="margin-bottom:10px" @bind="passwordInput" />
+<br />
+<input type="submit" class="btn btn-primary" value="Entra" @onclick="Authenticate" />
+<br />
+<p>@loginError</p>
+
+
+<hr />
+
+<p>Giocata: inserisci 5 numeri diversi</p>
+
+<EditForm Model="@bet" OnValidSubmit="ValidateBetNumbers">
+    <DataAnnotationsValidator />
+    <ValidationSummary />
+        <InputNumber @bind-Value="bet.first" />
+        <InputNumber @bind-Value="bet.second" />
+        <InputNumber @bind-Value="bet.third" />
+        <InputNumber @bind-Value="bet.fourth" />
+        <InputNumber @bind-Value="bet.fifth" style="margin-bottom:10px" />
+
+        <input type="submit" class="btn btn-primary" value="Gioca!" disabled="@(!IsBetPermitted)" />
+        <input type="button" class="btn btn-danger" value="Chiudi scommesse" disabled="@(!IsClosingPermitted)" @onclick="CloseBets" />
+
+</EditForm>
+
+<p>@betError</p>
+
+
+<hr />
+
+<ul id="messagesList">
+    @foreach (var message in messages)
+    {
+        <li>@message</li>
+    }
+</ul>
+
+@code {
+
+    private User user { get; set; }
+    private HubConnection hubConnection;
+    private string usernameInput { get; set; }
+    private string passwordInput { get; set; }
+    private List<string> messages = new List<string>();
+    private string loginError { get; set; }
+    private string betError { get; set; }
+
+    private HttpClient client { get; set; }
+
+    private bool IsBetPermitted = false;
+    private bool IsClosingPermitted = false;
+
+    private Bet bet { get; set; }
+
+    protected override void OnInitialized()
+    {
+        bet = new Bet();
+        user = new User();
+    }
+
+    private async Task Authenticate()
+    {
+        UserInfo loginInfo = new UserInfo()
+        {
+            username = usernameInput,
+            password = passwordInput
+        };
+
+        try
+        {
+            user = await Http.PostJsonAsync<User>(NavigationManager.ToAbsoluteUri("/auth/authenticate").AbsoluteUri, loginInfo);
+            loginError = "Utente autenticato";
+
+            hubConnection = new HubConnectionBuilder()
+                    .WithUrl(NavigationManager.ToAbsoluteUri("/bethub"))
+                    .Build();
+
+            hubConnection.On<string>("SendJackpot", (jackpot) =>
+            {
+                var encodedMsg = $"Il jackpot corrente è di {jackpot} euro";
+                messages.Add(encodedMsg);
+                StateHasChanged();
+            });
+
+            hubConnection.On<string>("UpdatedJackpot", (jackpot) =>
+            {
+                var encodedMsg = $"E' stata effettuata una giocata. Jackpot aggiornato a {jackpot} euro";
+                messages.Add(encodedMsg);
+                StateHasChanged();
+            });
+
+            hubConnection.On("CloseBets", () =>
+            {
+                var encodedMsg = $"Le scommesse sono chiuse. Buona fortuna!";
+                messages.Add(encodedMsg);
+                StateHasChanged();
+            });
+
+            hubConnection.On<string>("ExtractionResult", (message) =>
+            {
+                messages.Add(message);
+                StateHasChanged();
+            });
+
+            hubConnection.On<string>("NotifyWinning", (message) =>
+            {
+                messages.Add(message);
+                StateHasChanged();
+            });
+
+            await hubConnection.StartAsync();
+
+            await hubConnection.SendAsync("AskJackpot", user.username);
+
+            IsBetPermitted = BetsHandler.IsBettingPermitted;
+            IsClosingPermitted = BetsHandler.GetUserBetsCount(user.username) > 0 && BetsHandler.IsCloseable;
+        }
+        catch (HttpRequestException ex)
+        {
+            loginError = "Utente non autorizzato";
+            IsBetPermitted = false;
+            IsClosingPermitted = false;
+        }
+    }
+
+    private async Task ValidateBetNumbers()
+    {
+        bet.betNumbers.Add(bet.first);
+        bet.betNumbers.Add(bet.second);
+        bet.betNumbers.Add(bet.third);
+        bet.betNumbers.Add(bet.fourth);
+        bet.betNumbers.Add(bet.fifth);
+
+        bet.username = user.username;
+
+        if (bet.betNumbers.GroupBy(x => x).Count() < 5)
+        {
+            betError = "Errore: due o più numeri sono uguali";
+        }
+        else if (BetsHandler.GetUserBetsCount(user.username) >= 5)
+        {
+            betError = "Hai già effettuato 5 giocate";
+        }
+        else
+        {
+            await PlaceBet(bet);
+        }
+    }
+
+    private async Task CloseBets()
+    {
+        try
+        {
+            CreateClient();
+            await client.PostJsonAsync(NavigationManager.ToAbsoluteUri("/bet/closebets").AbsoluteUri, null);
+            IsClosingPermitted = false;
+            IsBetPermitted = false;
+        }
+        catch(Exception ex)
+        {
+            betError = "Scommesse già chiuse oppure si è verificato un problema";
+        }
+    }
+
+    private async Task PlaceBet(Bet bet)
+    {
+        try
+        {
+            CreateClient();
+            await client.PostJsonAsync("/bet/placebet", bet);
+            bet.betNumbers = new List<int>();
+            IsClosingPermitted = BetsHandler.GetUserBetsCount(user.username) > 0;
+            betError = "Giocata effettuata correttamente";
+        }
+        catch(Exception ex)
+        {
+            bet.betNumbers = new List<int>();
+            betError = "Si è verificato un errore nella richiesta";
+        }
+    }
+
+    private void CreateClient()
+    {
+        client = clientFactory.CreateClient();
+        client.BaseAddress = new Uri(NavigationManager.BaseUri);
+        client.DefaultRequestHeaders.Add("Jolly", user.jolly.ToString());
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", user.token);
+    }
+
+}
