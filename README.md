@@ -5,8 +5,7 @@ FUNZIONAMENTO
 
 Utenze abilitate:
 
-Gazza:psw
-Mario:supermario
+Gazza:psw - Mario:supermario
 
 Il Front-end è fatto in Blazor, non dovrebbero essere necessarie modifica di sorta per il funzionamento.
 
